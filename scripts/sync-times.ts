@@ -1,6 +1,11 @@
 import { PrismaClient } from "@prisma/client";
 import { chromium } from "playwright";
-import { scrapeWithPage, type ScrapedTime } from "./scraper";
+import {
+  scrapeWithPage,
+  getSwimYear,
+  type ScrapedTime,
+  type ScrapeOptions,
+} from "./scraper";
 
 const prisma = new PrismaClient();
 
@@ -53,30 +58,59 @@ async function upsertTimes(swimmerId: number, times: ScrapedTime[]) {
   return { added, updated };
 }
 
+/**
+ * Build a map of swim year → count of times already in the DB for a swimmer.
+ * Used for the "skip unchanged years" optimization.
+ */
+async function getExistingYearCounts(
+  swimmerId: number
+): Promise<Map<string, number>> {
+  const existingTimes = await prisma.swimTime.findMany({
+    where: { swimmerId },
+    select: { date: true },
+  });
+
+  const yearCounts = new Map<string, number>();
+  for (const t of existingTimes) {
+    const year = getSwimYear(t.date);
+    yearCounts.set(year, (yearCounts.get(year) || 0) + 1);
+  }
+  return yearCounts;
+}
+
 async function syncExistingSwimmers() {
   console.log("=== Syncing existing swimmers ===");
   const swimmers = await prisma.swimmer.findMany();
 
-  // Use a single browser for all swimmers
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext();
   const page = await context.newPage();
 
   try {
     for (const swimmer of swimmers) {
-      console.log(`\nSyncing ${swimmer.firstName} ${swimmer.lastName}...`);
+      console.log(
+        `\nSyncing ${swimmer.firstName} ${swimmer.lastName}...`
+      );
       try {
-        // Use the first name for search, club "Rockwall" to match
+        // Build year counts for skip optimization
+        const previousYearCounts = await getExistingYearCounts(swimmer.id);
+
+        const scrapeOptions: ScrapeOptions = {
+          previousYearCounts,
+        };
+
         const times = await scrapeWithPage(
           page,
           swimmer.firstName,
           swimmer.lastName,
-          "Rockwall"
+          "Rockwall",
+          scrapeOptions
         );
+
         if (times.length > 0) {
           const result = await upsertTimes(swimmer.id, times);
           console.log(
-            `  Done: ${result.added} added, ${result.updated} updated`
+            `  Total: ${times.length} scraped, ${result.added} added, ${result.updated} updated`
           );
         } else {
           console.log(`  No times found`);
@@ -121,7 +155,6 @@ async function processPendingRequests() {
         );
 
         if (times.length > 0) {
-          // Create or find the swimmer
           let swimmer = await prisma.swimmer.findFirst({
             where: {
               firstName: req.firstName,
@@ -179,7 +212,7 @@ async function processPendingRequests() {
 }
 
 async function main() {
-  console.log(`\n🏊 Green Machines Time Sync`);
+  console.log(`\n🏊 The Green Machines Time Sync`);
   console.log(`Started: ${new Date().toISOString()}\n`);
 
   try {

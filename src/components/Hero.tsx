@@ -32,7 +32,7 @@ export default function Hero() {
       <div className="relative z-10 max-w-5xl mx-auto px-4 py-20 md:py-28 text-center">
         <div className="text-6xl mb-4">🏊‍♀️</div>
         <h1 className="text-5xl md:text-7xl font-extrabold tracking-tight mb-4 drop-shadow-lg">
-          Green Machines
+          The Green Machines
         </h1>
         <p className="text-xl md:text-2xl font-medium text-green-50 max-w-2xl mx-auto mb-6">
           Making waves, breaking records, and having a blast in the pool.

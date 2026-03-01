@@ -14,9 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Green Machines | Competitive Swimming",
+  title: "The Green Machines | Competitive Swimming",
   description:
-    "Track times, view progressions, and race against the clock with the Green Machines swim team.",
+    "Track times, view progressions, and race against the clock with The Green Machines swim team.",
 };
 
 export default function RootLayout({
@@ -34,7 +34,7 @@ export default function RootLayout({
             <Link href="/" className="flex items-center gap-2">
               <span className="text-2xl">🏊</span>
               <span className="font-bold text-xl tracking-tight">
-                Green Machines
+                The Green Machines
               </span>
             </Link>
             <div className="flex items-center gap-4 text-sm font-medium">
@@ -63,7 +63,7 @@ export default function RootLayout({
         <footer className="bg-green-800 text-green-100 py-8 mt-16">
           <div className="max-w-7xl mx-auto px-4 text-center text-sm">
             <p className="font-semibold text-lg mb-1">
-              🏊 Green Machines
+              🏊 The Green Machines
             </p>
             <p className="text-green-300">
               Making waves, one race at a time.
