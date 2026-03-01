@@ -27,6 +27,9 @@ export async function GET(
         swimmer: {
           select: { firstName: true, lastName: true },
         },
+        splits: {
+          orderBy: { distance: "asc" },
+        },
       },
     });
 

@@ -15,6 +15,12 @@ interface Swimmer {
   _count: { times: number };
 }
 
+interface SwimSplit {
+  distance: number;
+  splitTime: number;
+  cumulativeSplitTime: number;
+}
+
 interface SwimTime {
   id: number;
   eventName: string;
@@ -23,6 +29,7 @@ interface SwimTime {
   meetName: string;
   course: string;
   swimmer: { firstName: string; lastName: string };
+  splits: SwimSplit[];
 }
 
 interface LaneConfig {
@@ -34,6 +41,7 @@ interface LaneConfig {
   lengths: number;
   color: string;
   label: string;
+  splits: SwimSplit[];
 }
 
 interface RaceResult {
@@ -72,6 +80,7 @@ function emptyLane(index: number): LaneConfig {
     lengths: 1,
     color: LANE_COLORS[index % LANE_COLORS.length],
     label: "",
+    splits: [],
   };
 }
 
@@ -207,6 +216,7 @@ export default function RaceSimulatorPage() {
     updateLane(laneIndex, {
       timeId: time.id,
       timeInSeconds: time.timeInSeconds,
+      splits: time.splits || [],
     });
     setOpenTimeDropdown(null);
   }
@@ -491,30 +501,59 @@ export default function RaceSimulatorPage() {
   function computeSwimmerFraction(
     elapsed: number,
     totalTime: number,
-    lengths: number
+    lengths: number,
+    splits: SwimSplit[]
   ): { fraction: number; finished: boolean } {
     if (elapsed >= totalTime) {
-      // Finished: determine final position
-      // If odd number of lengths, finish at far wall (fraction=1)
-      // If even, finish at start wall (fraction=0)
       const finalFraction = lengths % 2 === 1 ? 1 : 0;
       return { fraction: finalFraction, finished: true };
     }
 
-    const progress = elapsed / totalTime; // 0..1
-    const lengthProgress = progress * lengths; // e.g., 0..4 for 4 lengths
-    const currentLength = Math.floor(lengthProgress);
-    const withinLength = lengthProgress - currentLength;
-
-    // Even lengths (0, 2, 4...): swim left-to-right (0->1)
-    // Odd lengths (1, 3, 5...): swim right-to-left (1->0)
-    let fraction: number;
-    if (currentLength % 2 === 0) {
-      fraction = withinLength;
-    } else {
-      fraction = 1 - withinLength;
+    // If no splits available, use constant speed (original logic)
+    if (!splits || splits.length === 0) {
+      const progress = elapsed / totalTime;
+      const lengthProgress = progress * lengths;
+      const currentLength = Math.floor(Math.min(lengthProgress, lengths - 0.001));
+      const withinLength = lengthProgress - currentLength;
+      const fraction =
+        currentLength % 2 === 0 ? withinLength : 1 - withinLength;
+      return { fraction, finished: false };
     }
 
+    // Split-aware animation: each split covers 50 yards = 2 pool lengths.
+    // splits[i].cumulativeSplitTime = running total seconds at distance (i+1)*50
+    // splits[i].splitTime = individual 50-yard split seconds
+    let segmentIndex = 0;
+    let segmentStart = 0;
+
+    for (let i = 0; i < splits.length; i++) {
+      if (elapsed < splits[i].cumulativeSplitTime) {
+        segmentIndex = i;
+        segmentStart = i === 0 ? 0 : splits[i - 1].cumulativeSplitTime;
+        break;
+      }
+      // If we're past the last split, clamp to last segment
+      if (i === splits.length - 1) {
+        segmentIndex = i;
+        segmentStart = i === 0 ? 0 : splits[i - 1].cumulativeSplitTime;
+      }
+    }
+
+    const segmentDuration = splits[segmentIndex].splitTime;
+    const elapsedInSegment = elapsed - segmentStart;
+    const segmentProgress = Math.min(
+      segmentDuration > 0 ? elapsedInSegment / segmentDuration : 1,
+      1
+    );
+
+    // Each 50-yard segment = 2 pool lengths
+    const lengthInSegment = segmentProgress * 2;
+    const baseLengthIndex = segmentIndex * 2;
+    const currentLength = baseLengthIndex + Math.floor(Math.min(lengthInSegment, 1.999));
+    const withinLength = lengthInSegment - Math.floor(lengthInSegment);
+
+    const fraction =
+      currentLength % 2 === 0 ? withinLength : 1 - withinLength;
     return { fraction, finished: false };
   }
 
@@ -537,7 +576,8 @@ export default function RaceSimulatorPage() {
       const { fraction, finished } = computeSwimmerFraction(
         elapsed,
         totalTime,
-        lengths
+        lengths,
+        config.splits || []
       );
       positions.set(index, fraction);
 

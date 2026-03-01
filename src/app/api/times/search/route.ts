@@ -21,6 +21,9 @@ export async function GET(request: NextRequest) {
       include: {
         times: {
           orderBy: { date: "desc" },
+          include: {
+            splits: { orderBy: { distance: "asc" } },
+          },
         },
       },
     });

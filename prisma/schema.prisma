@@ -18,16 +18,28 @@ model Swimmer {
 }
 
 model SwimTime {
-  id            Int      @id @default(autoincrement())
+  id            Int         @id @default(autoincrement())
   swimmerId     Int
   eventName     String
   timeInSeconds Float
   date          DateTime
   meetName      String
   course        String
-  swimmer       Swimmer  @relation(fields: [swimmerId], references: [id])
+  swimmer       Swimmer     @relation(fields: [swimmerId], references: [id])
+  splits        SwimSplit[]
 
   @@unique([swimmerId, eventName, date, meetName])
+}
+
+model SwimSplit {
+  id                  Int      @id @default(autoincrement())
+  swimTimeId          Int
+  distance            Int
+  splitTime           Float
+  cumulativeSplitTime Float
+  swimTime            SwimTime @relation(fields: [swimTimeId], references: [id], onDelete: Cascade)
+
+  @@index([swimTimeId])
 }
 
 model SwimmerRequest {

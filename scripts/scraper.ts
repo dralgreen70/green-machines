@@ -1,11 +1,18 @@
 import { chromium, type Page } from "playwright";
 
+export interface ScrapedSplit {
+  distance: number;
+  splitTime: number;           // individual 50 split in seconds
+  cumulativeSplitTime: number; // running total in seconds
+}
+
 export interface ScrapedTime {
   eventName: string;
   timeInSeconds: number;
   date: Date;
   meetName: string;
   course: string;
+  splits: ScrapedSplit[];
 }
 
 export interface ScrapeOptions {
@@ -36,18 +43,95 @@ function parseTimeString(timeStr: string): number {
  * The year label is the ending calendar year (e.g. Sep 2024–Aug 2025 = "2025").
  */
 export function getSwimYear(date: Date): string {
-  const month = date.getMonth(); // 0-indexed
+  const month = date.getMonth();
   const year = date.getFullYear();
-  if (month >= 8) {
-    // September (8) through December (11) → next calendar year
-    return String(year + 1);
-  }
-  // January (0) through August (7) → current calendar year
+  if (month >= 8) return String(year + 1);
   return String(year);
 }
 
 /**
+ * Click a time link in a row, parse the splits modal, close it, return splits.
+ * Returns empty array if splits aren't available.
+ */
+async function scrapeSplitsForRow(
+  page: Page,
+  row: ReturnType<Page["locator"]>
+): Promise<ScrapedSplit[]> {
+  const splits: ScrapedSplit[] = [];
+
+  try {
+    // Click the time link (<a> in the second cell) to open the splits modal
+    const timeLink = row.locator("td").nth(1).locator("a").first();
+    if ((await timeLink.count()) === 0) return splits;
+
+    await timeLink.click();
+    // Wait for the modal dialog to appear
+    await page
+      .locator('[role="dialog"]')
+      .waitFor({ state: "visible", timeout: 5000 });
+    await page.waitForTimeout(500);
+
+    // Find the splits table inside the modal (it's the second or third table)
+    const dialog = page.locator('[role="dialog"]');
+    const splitsTable = dialog.locator("table").first();
+    if ((await splitsTable.count()) === 0) {
+      await closeModal(page);
+      return splits;
+    }
+
+    const bodyRows = await splitsTable.locator("tbody tr").all();
+    for (const splitRow of bodyRows) {
+      const cells = await splitRow.locator("td").allTextContents();
+      if (cells.length < 3) continue;
+
+      const distance = parseInt(cells[0]?.trim());
+      // "Split Time" column = cumulative time at this distance
+      const cumulativeStr = cells[1]?.trim();
+      // "Cumulative Split Time" column = individual 50 split
+      const individualStr = cells[2]?.trim();
+
+      if (isNaN(distance)) continue;
+
+      const cumulativeSplitTime = parseTimeString(cumulativeStr);
+      const splitTime = parseTimeString(individualStr);
+
+      if (cumulativeSplitTime <= 0 || splitTime <= 0) continue;
+
+      splits.push({ distance, splitTime, cumulativeSplitTime });
+    }
+  } catch {
+    // Splits not available for this swim — that's fine
+  }
+
+  // Always try to close the modal
+  await closeModal(page);
+  return splits;
+}
+
+async function closeModal(page: Page): Promise<void> {
+  try {
+    const closeBtn = page
+      .locator('[role="dialog"]')
+      .locator('button:has-text("Close"), button:has-text("Cancel")')
+      .first();
+    if ((await closeBtn.count()) > 0 && (await closeBtn.isVisible())) {
+      await closeBtn.click();
+      await page.waitForTimeout(300);
+    }
+  } catch {
+    // Try pressing Escape as fallback
+    try {
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(300);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+/**
  * Parse the currently visible times table on the USA Swimming results page.
+ * Also clicks into each row to scrape splits from the modal popup.
  */
 async function parseTimesTable(page: Page): Promise<ScrapedTime[]> {
   const times: ScrapedTime[] = [];
@@ -67,9 +151,18 @@ async function parseTimesTable(page: Page): Promise<ScrapedTime[]> {
 
   if (eventIdx < 0 || timeIdx < 0) return times;
 
+  // First pass: collect row data and check which are 50-yard events (no splits)
   const bodyRows = await table.locator("tbody tr").all();
-  for (const row of bodyRows) {
-    const cells = await row.locator("td").allTextContents();
+  const rowData: {
+    eventRaw: string;
+    timeStr: string;
+    meetName: string;
+    dateStr: string;
+    rowIndex: number;
+  }[] = [];
+
+  for (let i = 0; i < bodyRows.length; i++) {
+    const cells = await bodyRows[i].locator("td").allTextContents();
     const clean = cells.map((c) => c.trim());
 
     const eventRaw = clean[eventIdx] || "";
@@ -85,16 +178,36 @@ async function parseTimesTable(page: Page): Promise<ScrapedTime[]> {
     const date = new Date(dateStr);
     if (isNaN(date.getTime())) continue;
 
+    rowData.push({ eventRaw, timeStr, meetName, dateStr, rowIndex: i });
+  }
+
+  // Second pass: for each row, scrape splits (re-locate rows each time since
+  // the DOM may shift after modal open/close)
+  for (const rd of rowData) {
+    const timeInSeconds = parseTimeString(rd.timeStr);
+    const date = new Date(rd.dateStr);
+
     let course = "SCY";
-    if (eventRaw.includes("LCM")) course = "LCM";
-    else if (eventRaw.includes("SCM")) course = "SCM";
+    if (rd.eventRaw.includes("LCM")) course = "LCM";
+    else if (rd.eventRaw.includes("SCM")) course = "SCM";
+
+    // Check if this event is longer than 50 yards (splits available)
+    const is50 = rd.eventRaw.match(/^50\s/);
+    let splits: ScrapedSplit[] = [];
+
+    if (!is50) {
+      // Re-locate the row fresh (DOM may have changed after modal interactions)
+      const freshRow = table.locator("tbody tr").nth(rd.rowIndex);
+      splits = await scrapeSplitsForRow(page, freshRow);
+    }
 
     times.push({
-      eventName: eventRaw,
+      eventName: rd.eventRaw,
       timeInSeconds,
       date,
-      meetName,
+      meetName: rd.meetName,
       course,
+      splits,
     });
   }
 
@@ -103,8 +216,6 @@ async function parseTimesTable(page: Page): Promise<ScrapedTime[]> {
 
 /**
  * Get all available swim year options from the competition year dropdown.
- * Returns values like [{ value: "2026", text: "2026 (9/1/2025-8/31/2026)" }, ...]
- * ordered from most recent to oldest.
  */
 async function getAvailableSwimYears(
   page: Page
@@ -117,7 +228,6 @@ async function getAvailableSwimYears(
   for (const opt of options) {
     const value = (await opt.getAttribute("value")) || "";
     const text = ((await opt.textContent()) || "").trim();
-    // Skip placeholder options like "Select" and "--"
     if (value && text && !text.startsWith("Select") && text !== "--") {
       years.push({ value, text });
     }
@@ -168,20 +278,17 @@ export async function scrapeWithPage(
 ): Promise<ScrapedTime[]> {
   const allTimes: ScrapedTime[] = [];
 
-  // Navigate to USA Swimming individual search
   await page.goto(
     "https://data.usaswimming.org/datahub/usas/individualsearch",
     { waitUntil: "domcontentloaded", timeout: 30000 }
   );
   await page.waitForTimeout(2000);
 
-  // Fill in the search form
   await page.locator("#firstOrPreferredName").fill(firstName);
   await page.locator("#lastName").fill(lastName);
   await page.locator('button[type="submit"]').click();
   await page.waitForTimeout(4000);
 
-  // Find the correct swimmer row by club name
   const rows = await page.locator("table tr").all();
   let clicked = false;
   for (const row of rows) {
@@ -205,14 +312,11 @@ export async function scrapeWithPage(
     return allTimes;
   }
 
-  // Wait for the results page and times table to load
   await page.waitForTimeout(5000);
 
-  // Discover all available swim years
   const availableYears = await getAvailableSwimYears(page);
 
   if (availableYears.length === 0) {
-    // Fallback: just parse the default table (single year)
     console.log("  No year selector found, scraping default view only");
     const times = await parseTimesTable(page);
     allTimes.push(...times);
@@ -220,20 +324,16 @@ export async function scrapeWithPage(
     return allTimes;
   }
 
-  // Determine the currently selected year (first option is typically the default)
   const currentYearValue = await page
     .locator("#competitionYearId")
     .inputValue();
 
-  // Iterate through all available swim years
   for (const year of availableYears) {
     try {
-      // If this isn't the currently loaded year, switch to it
       if (year.value !== currentYearValue) {
         await selectSwimYear(page, year.value);
       }
 
-      // Optimization: for past years, check if row count matches DB count
       if (options?.previousYearCounts?.has(year.value)) {
         const knownCount = options.previousYearCounts.get(year.value)!;
         const rowCount = await page.locator("table tbody tr").count();
@@ -246,14 +346,15 @@ export async function scrapeWithPage(
         }
       }
 
-      // Parse the times table for this year
       const yearTimes = await parseTimesTable(page);
       allTimes.push(...yearTimes);
 
-      console.log(`  [${year.value}] ${yearTimes.length} times`);
+      const splitsCount = yearTimes.filter((t) => t.splits.length > 0).length;
+      console.log(
+        `  [${year.value}] ${yearTimes.length} times (${splitsCount} with splits)`
+      );
       options?.onYearScraped?.(year.value, yearTimes.length);
 
-      // If no rows, stop going further back — swimmer wasn't registered yet
       if (yearTimes.length === 0) {
         console.log(`  [${year.value}] No times found, stopping year search`);
         break;

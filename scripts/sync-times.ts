@@ -12,6 +12,7 @@ const prisma = new PrismaClient();
 async function upsertTimes(swimmerId: number, times: ScrapedTime[]) {
   let added = 0;
   let updated = 0;
+  let splitsStored = 0;
 
   for (const t of times) {
     try {
@@ -26,7 +27,10 @@ async function upsertTimes(swimmerId: number, times: ScrapedTime[]) {
         },
       });
 
+      let swimTimeId: number;
+
       if (existing) {
+        swimTimeId = existing.id;
         if (existing.timeInSeconds !== t.timeInSeconds) {
           await prisma.swimTime.update({
             where: { id: existing.id },
@@ -35,7 +39,7 @@ async function upsertTimes(swimmerId: number, times: ScrapedTime[]) {
           updated++;
         }
       } else {
-        await prisma.swimTime.create({
+        const created = await prisma.swimTime.create({
           data: {
             swimmerId,
             eventName: t.eventName,
@@ -45,7 +49,23 @@ async function upsertTimes(swimmerId: number, times: ScrapedTime[]) {
             course: t.course,
           },
         });
+        swimTimeId = created.id;
         added++;
+      }
+
+      // Store splits if available
+      if (t.splits && t.splits.length > 0) {
+        // Delete old splits and replace with fresh data
+        await prisma.swimSplit.deleteMany({ where: { swimTimeId } });
+        await prisma.swimSplit.createMany({
+          data: t.splits.map((s) => ({
+            swimTimeId,
+            distance: s.distance,
+            splitTime: s.splitTime,
+            cumulativeSplitTime: s.cumulativeSplitTime,
+          })),
+        });
+        splitsStored++;
       }
     } catch (error) {
       console.error(
@@ -55,26 +75,45 @@ async function upsertTimes(swimmerId: number, times: ScrapedTime[]) {
     }
   }
 
-  return { added, updated };
+  return { added, updated, splitsStored };
 }
 
 /**
  * Build a map of swim year → count of times already in the DB for a swimmer.
  * Used for the "skip unchanged years" optimization.
+ * Returns null for a year if any non-50 event is missing splits (forces re-scrape).
  */
 async function getExistingYearCounts(
   swimmerId: number
 ): Promise<Map<string, number>> {
   const existingTimes = await prisma.swimTime.findMany({
     where: { swimmerId },
-    select: { date: true },
+    select: {
+      date: true,
+      eventName: true,
+      _count: { select: { splits: true } },
+    },
   });
 
   const yearCounts = new Map<string, number>();
+  const yearsMissingSplits = new Set<string>();
+
   for (const t of existingTimes) {
     const year = getSwimYear(t.date);
     yearCounts.set(year, (yearCounts.get(year) || 0) + 1);
+
+    // Check if this non-50 event is missing splits
+    const is50 = t.eventName.match(/^50\s/);
+    if (!is50 && t._count.splits === 0) {
+      yearsMissingSplits.add(year);
+    }
   }
+
+  // Remove years that are missing splits so the scraper doesn't skip them
+  for (const year of yearsMissingSplits) {
+    yearCounts.delete(year);
+  }
+
   return yearCounts;
 }
 
@@ -110,7 +149,7 @@ async function syncExistingSwimmers() {
         if (times.length > 0) {
           const result = await upsertTimes(swimmer.id, times);
           console.log(
-            `  Total: ${times.length} scraped, ${result.added} added, ${result.updated} updated`
+            `  Total: ${times.length} scraped, ${result.added} added, ${result.updated} updated, ${result.splitsStored} with splits`
           );
         } else {
           console.log(`  No times found`);
