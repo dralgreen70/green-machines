@@ -1,0 +1,40 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Swimmer {
+  id              Int        @id @default(autoincrement())
+  firstName       String
+  lastName        String
+  usaSwimmingId   String?
+  times           SwimTime[]
+
+  @@unique([firstName, lastName])
+}
+
+model SwimTime {
+  id            Int      @id @default(autoincrement())
+  swimmerId     Int
+  eventName     String
+  timeInSeconds Float
+  date          DateTime
+  meetName      String
+  course        String
+  swimmer       Swimmer  @relation(fields: [swimmerId], references: [id])
+
+  @@unique([swimmerId, eventName, date, meetName])
+}
+
+model SwimmerRequest {
+  id              Int      @id @default(autoincrement())
+  firstName       String
+  lastName        String
+  usaSwimmingId   String?
+  requestedAt     DateTime @default(now())
+  status          String   @default("pending")
+}
