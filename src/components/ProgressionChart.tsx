@@ -61,7 +61,6 @@ export default function ProgressionChart({
           />
           <YAxis
             domain={[minTime - padding, maxTime + padding]}
-            reversed
             tick={{ fontSize: 12, fill: "#6b7280" }}
             tickFormatter={(v: number) => formatTime(v)}
             tickLine={false}
@@ -90,9 +89,6 @@ export default function ProgressionChart({
           />
         </LineChart>
       </ResponsiveContainer>
-      <p className="text-xs text-gray-400 text-center mt-2">
-        Lower on chart = faster time
-      </p>
     </div>
   );
 }

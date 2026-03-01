@@ -1,5 +1,6 @@
 import { PrismaClient } from "@prisma/client";
-import { scrapeSwimmerTimes, type ScrapedTime } from "./scraper";
+import { chromium } from "playwright";
+import { scrapeWithPage, type ScrapedTime } from "./scraper";
 
 const prisma = new PrismaClient();
 
@@ -56,27 +57,39 @@ async function syncExistingSwimmers() {
   console.log("=== Syncing existing swimmers ===");
   const swimmers = await prisma.swimmer.findMany();
 
-  for (const swimmer of swimmers) {
-    console.log(`\nSyncing ${swimmer.firstName} ${swimmer.lastName}...`);
-    try {
-      const times = await scrapeSwimmerTimes(
-        swimmer.firstName,
-        swimmer.lastName
-      );
-      if (times.length > 0) {
-        const result = await upsertTimes(swimmer.id, times);
-        console.log(
-          `  Done: ${result.added} added, ${result.updated} updated`
+  // Use a single browser for all swimmers
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  try {
+    for (const swimmer of swimmers) {
+      console.log(`\nSyncing ${swimmer.firstName} ${swimmer.lastName}...`);
+      try {
+        // Use the first name for search, club "Rockwall" to match
+        const times = await scrapeWithPage(
+          page,
+          swimmer.firstName,
+          swimmer.lastName,
+          "Rockwall"
         );
-      } else {
-        console.log(`  No times found (scraper may need USA Swimming site access)`);
+        if (times.length > 0) {
+          const result = await upsertTimes(swimmer.id, times);
+          console.log(
+            `  Done: ${result.added} added, ${result.updated} updated`
+          );
+        } else {
+          console.log(`  No times found`);
+        }
+      } catch (error) {
+        console.error(
+          `  Failed to sync ${swimmer.firstName} ${swimmer.lastName}:`,
+          error instanceof Error ? error.message : error
+        );
       }
-    } catch (error) {
-      console.error(
-        `  Failed to sync ${swimmer.firstName} ${swimmer.lastName}:`,
-        error instanceof Error ? error.message : error
-      );
     }
+  } finally {
+    await browser.close();
   }
 }
 
@@ -91,59 +104,77 @@ async function processPendingRequests() {
     return;
   }
 
-  for (const req of pendingRequests) {
-    console.log(`\nProcessing request: ${req.firstName} ${req.lastName}...`);
-    try {
-      const times = await scrapeSwimmerTimes(req.firstName, req.lastName);
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext();
+  const page = await context.newPage();
 
-      if (times.length > 0) {
-        // Create or find the swimmer
-        let swimmer = await prisma.swimmer.findFirst({
-          where: {
-            firstName: req.firstName,
-            lastName: req.lastName,
-          },
-        });
-
-        if (!swimmer) {
-          swimmer = await prisma.swimmer.create({
-            data: {
-              firstName: req.firstName,
-              lastName: req.lastName,
-              usaSwimmingId: req.usaSwimmingId,
-            },
-          });
-          console.log(`  Created swimmer: ${swimmer.firstName} ${swimmer.lastName}`);
-        }
-
-        const result = await upsertTimes(swimmer.id, times);
-        console.log(
-          `  Synced: ${result.added} added, ${result.updated} updated`
+  try {
+    for (const req of pendingRequests) {
+      console.log(
+        `\nProcessing request: ${req.firstName} ${req.lastName}...`
+      );
+      try {
+        const times = await scrapeWithPage(
+          page,
+          req.firstName,
+          req.lastName
         );
 
-        await prisma.swimmerRequest.update({
-          where: { id: req.id },
-          data: { status: "synced" },
-        });
-        console.log(`  Request status: synced`);
-      } else {
-        console.log(`  No times found for ${req.firstName} ${req.lastName}`);
+        if (times.length > 0) {
+          // Create or find the swimmer
+          let swimmer = await prisma.swimmer.findFirst({
+            where: {
+              firstName: req.firstName,
+              lastName: req.lastName,
+            },
+          });
+
+          if (!swimmer) {
+            swimmer = await prisma.swimmer.create({
+              data: {
+                firstName: req.firstName,
+                lastName: req.lastName,
+                usaSwimmingId: req.usaSwimmingId,
+              },
+            });
+            console.log(
+              `  Created swimmer: ${swimmer.firstName} ${swimmer.lastName}`
+            );
+          }
+
+          const result = await upsertTimes(swimmer.id, times);
+          console.log(
+            `  Synced: ${result.added} added, ${result.updated} updated`
+          );
+
+          await prisma.swimmerRequest.update({
+            where: { id: req.id },
+            data: { status: "synced" },
+          });
+          console.log(`  Request status: synced`);
+        } else {
+          console.log(
+            `  No times found for ${req.firstName} ${req.lastName}`
+          );
+          await prisma.swimmerRequest.update({
+            where: { id: req.id },
+            data: { status: "failed" },
+          });
+          console.log(`  Request status: failed`);
+        }
+      } catch (error) {
+        console.error(
+          `  Error processing request for ${req.firstName} ${req.lastName}:`,
+          error instanceof Error ? error.message : error
+        );
         await prisma.swimmerRequest.update({
           where: { id: req.id },
           data: { status: "failed" },
         });
-        console.log(`  Request status: failed`);
       }
-    } catch (error) {
-      console.error(
-        `  Error processing request for ${req.firstName} ${req.lastName}:`,
-        error instanceof Error ? error.message : error
-      );
-      await prisma.swimmerRequest.update({
-        where: { id: req.id },
-        data: { status: "failed" },
-      });
     }
+  } finally {
+    await browser.close();
   }
 }
 

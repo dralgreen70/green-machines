@@ -1,4 +1,4 @@
-import { chromium, type Page } from "playwright";
+import { chromium, type Page, type Browser } from "playwright";
 
 export interface ScrapedTime {
   eventName: string;
@@ -11,170 +11,140 @@ export interface ScrapedTime {
 function parseTimeString(timeStr: string): number {
   const cleaned = timeStr.trim();
   if (cleaned.includes(":")) {
-    const [mins, secs] = cleaned.split(":");
-    return parseInt(mins) * 60 + parseFloat(secs);
+    const parts = cleaned.split(":");
+    if (parts.length === 2) {
+      return parseInt(parts[0]) * 60 + parseFloat(parts[1]);
+    }
   }
-  return parseFloat(cleaned);
+  const val = parseFloat(cleaned);
+  return isNaN(val) ? -1 : val;
 }
 
-function normalizeCourse(course: string): string {
-  const c = course.toUpperCase().trim();
-  if (c.includes("SCY") || c.includes("SHORT COURSE YARDS")) return "SCY";
-  if (c.includes("SCM") || c.includes("SHORT COURSE METERS")) return "SCM";
-  if (c.includes("LCM") || c.includes("LONG COURSE METERS")) return "LCM";
-  return c;
-}
-
+/**
+ * Scrape all times for a swimmer from USA Swimming's data hub.
+ *
+ * @param firstName - First/preferred name to search (e.g. "Mady")
+ * @param lastName  - Last name to search (e.g. "Green")
+ * @param clubMatch - Substring to match in the results table to identify the
+ *                    correct swimmer (e.g. "Rockwall"). If empty, picks the first result.
+ */
 export async function scrapeSwimmerTimes(
   firstName: string,
-  lastName: string
+  lastName: string,
+  clubMatch?: string
 ): Promise<ScrapedTime[]> {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  const times: ScrapedTime[] = [];
-
   try {
-    console.log(`  Navigating to USA Swimming individual times search...`);
-    await page.goto(
-      "https://www.usaswimming.org/times/individual-times-search",
-      { waitUntil: "networkidle", timeout: 30000 }
-    );
-
-    // Fill in name fields
-    await fillSearchForm(page, firstName, lastName);
-
-    // Wait for results to load
-    console.log(`  Waiting for results...`);
-    await page.waitForTimeout(5000);
-
-    // Try to find results table
-    const hasResults = await page
-      .locator("table, .times-result, .result-row, [class*='result']")
-      .first()
-      .isVisible({ timeout: 10000 })
-      .catch(() => false);
-
-    if (!hasResults) {
-      console.log(`  No results table found for ${firstName} ${lastName}`);
-      return times;
-    }
-
-    // Parse results - adapt selectors to actual page structure
-    const rows = await page
-      .locator("table tbody tr, .result-row, [class*='time-row']")
-      .all();
-
-    console.log(`  Found ${rows.length} result rows`);
-
-    for (const row of rows) {
-      try {
-        const cells = await row.locator("td").all();
-        if (cells.length < 4) continue;
-
-        const cellTexts = await Promise.all(
-          cells.map((c) => c.textContent().then((t) => t?.trim() || ""))
-        );
-
-        // Try to extract event name, time, date, meet name, course
-        // Actual column order depends on the site's current layout
-        const eventName = cellTexts[0] || "";
-        const timeStr = cellTexts[1] || "";
-        const dateStr = cellTexts[2] || "";
-        const meetName = cellTexts[3] || "";
-        const course = cellTexts[4] || "SCY";
-
-        if (!eventName || !timeStr) continue;
-
-        const timeInSeconds = parseTimeString(timeStr);
-        if (isNaN(timeInSeconds) || timeInSeconds <= 0) continue;
-
-        const date = new Date(dateStr);
-        if (isNaN(date.getTime())) continue;
-
-        const normalizedCourse = normalizeCourse(course);
-        const fullEventName = `${eventName} ${normalizedCourse}`;
-
-        times.push({
-          eventName: fullEventName,
-          timeInSeconds,
-          date,
-          meetName: meetName || "Unknown Meet",
-          course: normalizedCourse,
-        });
-      } catch {
-        // Skip rows that don't parse correctly
-        continue;
-      }
-    }
-
-    console.log(`  Parsed ${times.length} times for ${firstName} ${lastName}`);
-  } catch (error) {
-    console.error(
-      `  Error scraping times for ${firstName} ${lastName}:`,
-      error instanceof Error ? error.message : error
-    );
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    return await scrapeWithPage(page, firstName, lastName, clubMatch);
   } finally {
     await browser.close();
   }
-
-  return times;
 }
 
-async function fillSearchForm(
+/**
+ * Scrape times using an existing page — useful for batching multiple swimmers
+ * without reopening the browser.
+ */
+export async function scrapeWithPage(
   page: Page,
   firstName: string,
-  lastName: string
-) {
-  // Try common form field selectors
-  const firstNameSelectors = [
-    'input[name="firstName"]',
-    'input[name="first_name"]',
-    'input[placeholder*="First"]',
-    'input[id*="first"]',
-    "#firstName",
-  ];
-  const lastNameSelectors = [
-    'input[name="lastName"]',
-    'input[name="last_name"]',
-    'input[placeholder*="Last"]',
-    'input[id*="last"]',
-    "#lastName",
-  ];
+  lastName: string,
+  clubMatch?: string
+): Promise<ScrapedTime[]> {
+  const times: ScrapedTime[] = [];
 
-  for (const sel of firstNameSelectors) {
-    const el = page.locator(sel).first();
-    if (await el.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await el.fill(firstName);
-      console.log(`  Filled first name using selector: ${sel}`);
+  // Navigate to USA Swimming individual search
+  await page.goto(
+    "https://data.usaswimming.org/datahub/usas/individualsearch",
+    { waitUntil: "domcontentloaded", timeout: 30000 }
+  );
+  await page.waitForTimeout(2000);
+
+  // Fill in the search form
+  await page.locator("#firstOrPreferredName").fill(firstName);
+  await page.locator("#lastName").fill(lastName);
+  await page.locator('button[type="submit"]').click();
+  await page.waitForTimeout(4000);
+
+  // Find the correct swimmer row by club name
+  const rows = await page.locator("table tr").all();
+  let clicked = false;
+
+  for (const row of rows) {
+    const text = await row.textContent().catch(() => "");
+    if (!text) continue;
+
+    // If clubMatch is provided, use it to identify the right swimmer
+    if (clubMatch && !text.includes(clubMatch)) continue;
+
+    const btn = row.locator("button, a").filter({ hasText: /see results/i });
+    if ((await btn.count()) > 0) {
+      await btn.first().click();
+      clicked = true;
       break;
     }
   }
 
-  for (const sel of lastNameSelectors) {
-    const el = page.locator(sel).first();
-    if (await el.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await el.fill(lastName);
-      console.log(`  Filled last name using selector: ${sel}`);
-      break;
-    }
+  if (!clicked) {
+    console.log(
+      `  Could not find swimmer ${firstName} ${lastName}` +
+        (clubMatch ? ` matching club "${clubMatch}"` : "")
+    );
+    return times;
   }
 
-  // Try to click search button
-  const searchSelectors = [
-    'button[type="submit"]',
-    'button:has-text("Search")',
-    'input[type="submit"]',
-    'button:has-text("Find")',
-    ".search-button",
-  ];
+  // Wait for the times table to load
+  await page.waitForTimeout(5000);
 
-  for (const sel of searchSelectors) {
-    const el = page.locator(sel).first();
-    if (await el.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await el.click();
-      console.log(`  Clicked search using selector: ${sel}`);
-      break;
-    }
+  // Parse the times table
+  const table = page.locator("table").first();
+  const headerRow = await table.locator("thead tr").first();
+  const headers = await headerRow.locator("th").allTextContents();
+  const cleanHeaders = headers.map((h) => h.trim().toLowerCase());
+
+  const eventIdx = cleanHeaders.findIndex((h) => h.includes("event"));
+  const timeIdx = cleanHeaders.findIndex((h) => h.includes("swim time"));
+  const meetIdx = cleanHeaders.findIndex((h) => h.includes("meet"));
+  const dateIdx = cleanHeaders.findIndex((h) => h.includes("swim date"));
+
+  if (eventIdx < 0 || timeIdx < 0) {
+    console.log("  Could not identify table columns");
+    return times;
   }
+
+  const bodyRows = await table.locator("tbody tr").all();
+  for (const row of bodyRows) {
+    const cells = await row.locator("td").allTextContents();
+    const clean = cells.map((c) => c.trim());
+
+    const eventRaw = clean[eventIdx] || "";
+    const timeStr = clean[timeIdx] || "";
+    const meetName = meetIdx >= 0 ? clean[meetIdx] || "" : "";
+    const dateStr = dateIdx >= 0 ? clean[dateIdx] || "" : "";
+
+    if (!eventRaw || !timeStr) continue;
+
+    const timeInSeconds = parseTimeString(timeStr);
+    if (timeInSeconds <= 0) continue;
+
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) continue;
+
+    // Detect course from the event name (e.g. "50 FR SCY", "100 FR LCM")
+    let course = "SCY";
+    if (eventRaw.includes("LCM")) course = "LCM";
+    else if (eventRaw.includes("SCM")) course = "SCM";
+
+    times.push({
+      eventName: eventRaw,
+      timeInSeconds,
+      date,
+      meetName,
+      course,
+    });
+  }
+
+  return times;
 }
